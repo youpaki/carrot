@@ -118,9 +118,8 @@ class CarrotModel:
         self.accuracy: float = 0.0
         self.brier_score: float = 1.0
 
-    def train(self, X, y, params: dict = None) -> dict:
-        """Train with given params. Returns metrics dict."""
-        from sklearn.model_selection import train_test_split
+    def train(self, X_train, y_train, X_test, y_test, params: dict = None) -> dict:
+        """Train with given params. X/y already split chronologically. Returns metrics dict."""
         from sklearn.metrics import accuracy_score, brier_score_loss
 
         p = {
@@ -138,17 +137,12 @@ class CarrotModel:
         }
         p.update(params or {})
 
-        n_pos = int(y.sum())
-        n_neg = len(y) - n_pos
+        n_pos = int(y_train.sum())
+        n_neg = len(y_train) - n_pos
         if n_pos > 0 and n_neg > 0:
             p["scale_pos_weight"] = n_neg / n_pos
 
-        # Use subset for speed if >50k samples
-        if len(X) > 50000:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        else:
-            X_train, X_test, y_train, y_test = X, y, X, y
-
+        # Use pre-split data (time-based split from trainer)
         self.model = xgb.XGBClassifier(**p)
         self.model.fit(
             X_train, y_train,
@@ -161,7 +155,13 @@ class CarrotModel:
 
         acc = float(accuracy_score(y_test, y_pred))
         brier = float(brier_score_loss(y_test, y_prob))
-        logloss = brier  # approximate with Brier when eval results unavailable
+        logloss = brier
+
+        # Baseline: accuracy if we always predicted the majority class
+        n_pos_test = int(y_test.sum())
+        n_neg_test = len(y_test) - n_pos_test
+        baseline_acc = max(n_pos_test, n_neg_test) / len(y_test) if len(y_test) > 0 else 0.5
+        edge = round(acc - baseline_acc, 4)
 
         self.accuracy = acc
         self.brier_score = brier
@@ -171,11 +171,14 @@ class CarrotModel:
             "accuracy": round(acc, 4),
             "brier_score": round(brier, 4),
             "log_loss": round(logloss, 4),
+            "baseline_accuracy": round(baseline_acc, 4),
+            "edge": edge,
             "win_rate": round(acc, 4),
-            "n_samples": int(len(y)),
-            "n_features": X.shape[1],
-            "n_positives": int(n_pos),
-            "n_negatives": int(n_neg),
+            "n_samples": int(len(y_test)),
+            "n_samples_train": int(len(y_train)),
+            "n_features": X_train.shape[1],
+            "n_positives": int(n_pos_test),
+            "n_negatives": int(n_neg_test),
             "scale_pos_weight": round(p.get("scale_pos_weight", 0), 4),
             "n_estimators": p["n_estimators"],
             "max_depth": p["max_depth"],

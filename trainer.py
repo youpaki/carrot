@@ -19,11 +19,11 @@ import config
 from model import CarrotModel
 
 
-def _train_job(X, y, params: dict) -> dict:
+def _train_job(X_train, y_train, X_test, y_test, params: dict) -> dict:
     """Train one model. Returns params + metrics."""
     try:
         model = CarrotModel()
-        metrics = model.train(X, y, params)
+        metrics = model.train(X_train, y_train, X_test, y_test, params)
         return {"params": params, **metrics, "ok": True}
     except Exception as e:
         return {"params": params, "ok": False, "error": str(e)}
@@ -39,7 +39,7 @@ class TrainingManager:
         self._executor = None
 
     async def fetch_data(self) -> tuple:
-        """Fetch ML training dataset from PolyCore. Returns (X, y)."""
+        """Fetch ML training dataset from PolyCore. Returns (X_train, y_train, X_test, y_test)."""
         url = f"{config.POLYCORE_URL}/tracker/export/ml/lite"
         params = {"only_resolved": True, "min_size_usdc": 1}
         if config.WHALE_FILTER:
@@ -53,16 +53,31 @@ class TrainingManager:
 
         rows = data.get("data", [])
         if not rows:
-            return None, None
+            return None, None, None, None
 
         df = pd.DataFrame(rows)
-        feature_cols = [c for c in df.columns if c not in ("trade_id", "won", "pnl", "pnl_pct")]
+        feature_cols = [c for c in df.columns if c not in ("trade_id", "won", "pnl", "pnl_pct", "timestamp")]
         for c in feature_cols:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-        X = df[feature_cols].values.astype(np.float32)
-        y = df["won"].values.astype(int)
-        return X, y
+        # Time-based walk-forward split: train on past, test on future
+        if "timestamp" in df.columns:
+            df["ts"] = pd.to_datetime(df["timestamp"])
+            df = df.sort_values("ts")
+            df = df.drop(columns=["ts", "timestamp"])
+        else:
+            df = df.sample(frac=1, random_state=42)
+
+        split_idx = int(len(df) * 0.8)
+        train_df = df.iloc[:split_idx]
+        test_df = df.iloc[split_idx:]
+
+        X_train = train_df[feature_cols].values.astype(np.float32)
+        y_train = train_df["won"].values.astype(int)
+        X_test = test_df[feature_cols].values.astype(np.float32)
+        y_test = test_df["won"].values.astype(int)
+
+        return X_train, y_train, X_test, y_test
 
     def _param_grid(self):
         """Generate hyperparameter combinations to explore."""
@@ -95,14 +110,14 @@ class TrainingManager:
         self.running = True
         self.total_completed = 0
 
-        X, y = await self.fetch_data()
-        if X is None or len(X) < 50:
-            print(f"[Trainer] Not enough data: {len(X) if X is not None else 0} samples")
+        X_train, y_train, X_test, y_test = await self.fetch_data()
+        if X_train is None or len(X_train) < 50:
+            print(f"[Trainer] Not enough data: {len(X_train) if X_train is not None else 0} samples")
             self.running = False
             return
 
-        print(f"[Trainer] Loaded {len(X)} samples, {X.shape[1]} features, "
-              f"{int(y.sum())} wins, {int((1-y).sum())} losses")
+        print(f"[Trainer] Time-split: train={len(X_train)} test={len(X_test)} "
+              f"train_wins={int(y_train.sum())} test_wins={int(y_test.sum())}")
 
         param_list = self._param_grid()
         print(f"[Trainer] Generated {len(param_list)} parameter combos, "
@@ -113,7 +128,7 @@ class TrainingManager:
 
         # Submit initial batch
         for params in param_list[:config.MAX_TRAIN_JOBS]:
-            futures[self._executor.submit(_train_job, X, y, params)] = params
+            futures[self._executor.submit(_train_job, X_train, y_train, X_test, y_test, params)] = params
 
         next_idx = config.MAX_TRAIN_JOBS
         completed = 0
@@ -147,7 +162,7 @@ class TrainingManager:
                     if not self.best_model or acc > self.best_metrics.get("accuracy", 0):
                         self.best_metrics = result
                         best = CarrotModel()
-                        best.train(X, y, params)
+                        best.train(X_train, y_train, X_test, y_test, params)
                         self.best_model = best
                         best.save(config.MODEL_DIR / "best_model.pkl")
                         print(f"[Trainer] ★ New best: acc={acc:.4f}")
@@ -167,7 +182,7 @@ class TrainingManager:
                 # Submit next if available
                 if next_idx < len(param_list) and self.running:
                     params = param_list[next_idx]
-                    futures[self._executor.submit(_train_job, X, y, params)] = params
+                    futures[self._executor.submit(_train_job, X_train, y_train, X_test, y_test, params)] = params
                     next_idx += 1
 
             if not futures and next_idx >= len(param_list):
