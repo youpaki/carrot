@@ -143,14 +143,16 @@ class CarrotBot:
 
     # ── HTTP helpers ────────────────────────────────────────────────────────
 
-    async def _api(self, method, path, body=None, params=None, timeout=30):
+    async def _api(self, method, path, body=None, params=None, timeout=15):
         url = f"{config.POLYCORE_URL}{path}"
         h = {"X-API-Key": config.API_KEY, "Content-Type": "application/json"}
-        if self.httpx_client is None:
-            self.httpx_client = httpx.AsyncClient(timeout=timeout)
-        r = await self.httpx_client.request(method, url, json=body, params=params, headers=h)
-        r.raise_for_status()
-        return r.json()
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.request(method, url, json=body, params=params, headers=h)
+                r.raise_for_status()
+                return r.json()
+        except Exception as e:
+            raise type(e)(f"{method} {path}: {e}") from e
 
     async def _report_trade(self, market_id: str, side: str, size: float, price: float, market_title: str, outcome: str, token_id: str = None, event_slug: str = "", status: str = "open", pnl: float = None):
         """Report a paper trade to PolyCore. Deduped per (market, side, timestamp window)."""
@@ -190,7 +192,7 @@ class CarrotBot:
                 "run_id": str(uuid.uuid4()),
                 "status": "completed",
                 "model_version": self.get_model().version,
-                "metrics": metrics,
+                "metrics": {**metrics},
             })
         except Exception as e:
             print(f"[API] Report training failed: {e}")
