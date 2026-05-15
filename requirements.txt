@@ -1,0 +1,7 @@
+websockets>=14.0
+httpx>=0.25.0
+numpy>=1.26.0
+pandas>=2.2.0
+xgboost>=2.0.0
+scikit-learn>=1.4.0
+python-dotenv>=1.0.0
