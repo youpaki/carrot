@@ -731,7 +731,9 @@ class CarrotBot:
         # In live mode, use live data from PolyCore cache
         if not config.DRY_RUN and hasattr(self, '_live_positions'):
             positions = {}
-            for i, p in enumerate(self._live_positions):
+            for i, p in enumerate(self._live_positions or []):
+                if not isinstance(p, dict):
+                    continue
                 positions[f"live_{i}"] = {
                     "market_id": p.get("market", ""),
                     "outcome": p.get("outcome", ""),
@@ -742,6 +744,8 @@ class CarrotBot:
                 }
             trade_history = []
             for t in self._live_trades:
+                if not isinstance(t, dict):
+                    continue
                 size = float(t.get("size", 0))
                 price = float(t.get("price", 0))
                 trade_history.append({
@@ -790,8 +794,8 @@ class CarrotBot:
                 "running": self.trainer.running,
                 "jobs_active": self.trainer.jobs_active,
                 "total_completed": self.trainer.total_completed,
-                "best_accuracy": round(self.trainer.best_metrics.get("accuracy", 0), 4) if self.trainer.best_metrics else None,
-                "best_brier": round(self.trainer.best_metrics.get("brier", 0), 4) if self.trainer.best_metrics else None,
+                "best_accuracy": round(self.trainer.best_metrics.get("accuracy", 0), 4) if isinstance(self.trainer.best_metrics, dict) and self.trainer.best_metrics else None,
+                "best_brier": round(self.trainer.best_metrics.get("brier", 0), 4) if isinstance(self.trainer.best_metrics, dict) and self.trainer.best_metrics else None,
             },
             "config": {
                 "DRY_RUN": config.DRY_RUN,
@@ -933,8 +937,8 @@ class CarrotBot:
                 "running": self.trainer.running,
                 "jobs_active": self.trainer.jobs_active,
                 "total_completed": self.trainer.total_completed,
-                "best_accuracy": round(self.trainer.best_metrics.get("accuracy", 0), 4) if self.trainer.best_metrics else None,
-                "best_brier": round(self.trainer.best_metrics.get("brier", 0), 4) if self.trainer.best_metrics else None,
+                "best_accuracy": round(self.trainer.best_metrics.get("accuracy", 0), 4) if isinstance(self.trainer.best_metrics, dict) and self.trainer.best_metrics else None,
+                "best_brier": round(self.trainer.best_metrics.get("brier", 0), 4) if isinstance(self.trainer.best_metrics, dict) and self.trainer.best_metrics else None,
                 "started_at": str(sa) if sa else None,
                 "elapsed": str(datetime.now(timezone.utc) - sa).split('.')[0] if sa and self.trainer.running else None,
             },
