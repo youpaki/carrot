@@ -728,24 +728,24 @@ class CarrotBot:
         pf = self.portfolio
         m = self.get_model()
 
-        # In live mode, use live data from PolyCore cache
-        if not config.DRY_RUN and hasattr(self, '_live_positions'):
+        # In live mode, use portfolio positions (populated by _sync_live_wallet)
+        if not config.DRY_RUN and pf.positions:
             positions = {}
-            for i, p in enumerate(self._live_positions or []):
+            for pid, p in pf.positions.items():
                 if not isinstance(p, dict):
                     continue
-                sz = float(p.get("size", 0))
-                avg = float(p.get("avg_price", 0))
-                cst = float(p.get("cost", 0)) if p.get("cost") else sz * avg
+                sz = float(p.get("shares", p.get("size", 0)))
+                avg = float(p.get("price", p.get("avg_price", 0)))
+                cst = float(p.get("cost", 0))
                 if sz <= 0 or cst <= 0:
                     continue
-                positions[f"live_{i}"] = {
-                    "market_id": p.get("market", ""),
+                positions[pid] = {
+                    "market_id": p.get("market_id", p.get("market", "")),
                     "outcome": p.get("outcome", ""),
                     "shares": sz,
                     "price": avg,
                     "cost": round(cst, 4),
-                    "market_title": p.get("question", p.get("market", "")),
+                    "market_title": p.get("market_title", p.get("question", "")),
                 }
 
             # Build trade history from recent CLOB trades (last 20)
@@ -773,12 +773,7 @@ class CarrotBot:
 
             cash = round(pf.cash, 4)
             total_invested = round(sum(p.get("cost", 0) for p in positions.values()), 4)
-            # Unrealized PnL: estimate current value using avg_price (positions are recent)
-            total_unrealized = round(sum(
-                max(0, p.get("shares", 0) * p.get("price", 0) - p.get("cost", 0))
-                for p in positions.values()
-            ), 4)
-            total_pnl = total_unrealized
+            total_pnl = round(sum(max(0, p.get("shares", 0) * p.get("price", 0) - p.get("cost", 0)) for p in positions.values()), 4)
             total_trades = len(self._live_trades) if self._live_trades else 0
         else:
             positions = {pid: {k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in p.items()} for pid, p in pf.positions.items()}
