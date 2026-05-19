@@ -734,12 +734,17 @@ class CarrotBot:
             for i, p in enumerate(self._live_positions or []):
                 if not isinstance(p, dict):
                     continue
+                sz = float(p.get("size", 0))
+                avg = float(p.get("avg_price", 0))
+                cst = float(p.get("cost", 0)) if p.get("cost") else sz * avg
+                if sz <= 0 or cst <= 0:
+                    continue
                 positions[f"live_{i}"] = {
                     "market_id": p.get("market", ""),
                     "outcome": p.get("outcome", ""),
-                    "shares": float(p.get("size", 0)),
-                    "price": float(p.get("avg_price", 0)),
-                    "cost": float(p.get("size", 0)) * float(p.get("avg_price", 0)),
+                    "shares": sz,
+                    "price": avg,
+                    "cost": round(cst, 4),
                     "market_title": p.get("question", p.get("market", "")),
                 }
             trade_history = []
@@ -762,7 +767,7 @@ class CarrotBot:
                     "side": t.get("side", ""),
                 })
             cash = round(pf.cash, 4)
-            total_invested = round(sum(p.get("size", 0) * p.get("avg_price", 0) for p in positions), 4)
+            total_invested = round(sum(p.get("cost", 0) for p in positions.values()), 4)
             total_pnl = round(sum(t.get("pnl", 0) or 0 for t in trade_history if t.get("status") == "SETTLED"), 4)
             total_trades = len(trade_history)
         else:
