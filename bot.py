@@ -451,7 +451,12 @@ class CarrotBot:
                 order_type = "FOK"  # market order — min $1 value
             else:
                 return  # can't meet either minimum
-            print(f"[Trade] BUY ${size_usdc:.2f} ({shares:.1f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
+            # CLOB requires: taker amount ≤4 decimals, maker amount ≤2 decimals
+            shares = round(shares, 4)
+            maker_usdc = round(shares * price, 2)
+            if maker_usdc < 1:
+                return  # below minimum
+            print(f"[Trade] BUY ${maker_usdc:.2f} ({shares:.4f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
 
             # Place order FIRST (speed critical for short-lived markets)
             if not config.DRY_RUN:
@@ -490,7 +495,8 @@ class CarrotBot:
             else:
                 return  # can't meet either minimum
 
-            sell_usdc = sell_shares * price
+            sell_shares = round(sell_shares, 4)
+            sell_usdc = round(sell_shares * price, 2)
 
             print(f"[Trade] SELL ${sell_usdc:.2f} ({sell_shares:.1f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
 
