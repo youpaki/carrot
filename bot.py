@@ -27,17 +27,44 @@ import websockets
 import config
 from model import CarrotModel, encode_event, features_array
 from trainer import TrainingManager
+from db import Persistence
 
 
 class Portfolio:
     """Local portfolio: tracks positions, cash, realized PnL."""
 
-    def __init__(self, initial_cash: float):
-        self.cash = initial_cash
+    def __init__(self, initial_cash: float, persist: Persistence = None):
         self.initial_cash = initial_cash
+        self.persist = persist
         self.positions: dict[str, dict] = {}
         self.trade_history: list[dict] = []
         self.total_trades = 0
+        self.cash = initial_cash
+        if persist:
+            self._load()
+
+    def _load(self):
+        """Load state from SQLite."""
+        data = self.persist.load_portfolio()
+        if data["cash"] is not None:
+            self.cash = data["cash"]
+        if data["initial_cash"] is not None:
+            self.initial_cash = data["initial_cash"]
+        self.total_trades = data["total_trades"]
+        # In live mode, don't load old paper positions — PolyCore is source of truth
+        if not config.DRY_RUN:
+            self.positions = {}
+            self.trade_history = []
+        else:
+            self.positions = data["positions"]
+            self.trade_history = data["trades"]
+        if self.positions or self.trade_history:
+            print(f"[DB] Loaded {len(self.positions)} positions, {len(self.trade_history)} trades, ${self.cash:.2f} cash")
+
+    def _save(self):
+        """Persist state to SQLite (called after every mutation)."""
+        if self.persist:
+            self.persist.save_portfolio(self)
 
     @property
     def total_invested(self) -> float:
@@ -62,6 +89,8 @@ class Portfolio:
             "cost": cost,
             "outcome": meta.get("outcome", "YES") if meta else "YES",
             "market_title": meta.get("market_title", "") if meta else "",
+            "event_slug": meta.get("event_slug", "") if meta else "",
+            "end_date": meta.get("end_date", "") if meta else "",
             "opened_at": datetime.now(timezone.utc),
         }
         # Merge with existing same-market BUY position
@@ -77,6 +106,7 @@ class Portfolio:
         self.cash -= cost
         self.positions[str(uuid.uuid4())] = pos
         self.total_trades += 1
+        self._save()
         return pos
 
     def close(self, pos_id: str, sell_price: float, shares: float = None) -> dict:
@@ -100,6 +130,8 @@ class Portfolio:
 
         trade = {
             "market_id": pos["market_id"],
+            "market_title": pos.get("market_title", ""),
+            "event_slug": pos.get("event_slug", ""),
             "entry_price": pos["price"],
             "exit_price": sell_price,
             "shares": s,
@@ -111,6 +143,7 @@ class Portfolio:
         }
         self.trade_history.append(trade)
         self.total_trades += 1
+        self._save()
         return trade
 
 
@@ -119,7 +152,8 @@ class CarrotBot:
         self.model = CarrotModel()
         self._model_lock = threading.Lock()
         self.trainer = TrainingManager()
-        self.portfolio = Portfolio(config.INITIAL_BUDGET)
+        self.persist = Persistence()
+        self.portfolio = Portfolio(config.INITIAL_BUDGET, persist=self.persist)
         self.httpx_client = None
         self.whale_cache = {}
         self.uptime_start = None
@@ -130,6 +164,8 @@ class CarrotBot:
         self._events_received = 0
         self._recent_trades = set()  # dedup
         self._tasks = []
+        self._live_positions = []
+        self._live_trades = []
 
     # ── Model hot-swap (thread-safe) ───────────────────────────────────────
 
@@ -147,12 +183,83 @@ class CarrotBot:
         url = f"{config.POLYCORE_URL}{path}"
         h = {"X-API-Key": config.API_KEY, "Content-Type": "application/json"}
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.request(method, url, json=body, params=params, headers=h)
-                r.raise_for_status()
-                return r.json()
+            if self.httpx_client is None:
+                self.httpx_client = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+            r = await self.httpx_client.request(method, url, json=body, params=params, headers=h, timeout=timeout)
+            if r.status_code >= 400:
+                detail = r.text[:500]
+                print(f"[API] {r.status_code} {path}: {detail}")
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            print(f"[API] HTTP {e.response.status_code} {path}: {e.response.text[:300]}")
+            raise
         except Exception as e:
-            raise type(e)(f"{method} {path}: {e}") from e
+            print(f"[API] {type(e).__name__} {path}: {e}")
+            raise
+
+    async def _fix_missing_end_dates(self):
+        """Re-fetch end_dates for positions that have empty end_dates."""
+        missing = [(pid, pos) for pid, pos in self.portfolio.positions.items() if not pos.get("end_date")]
+        if not missing:
+            return
+        print(f"[DB] Re-fetching end_dates for {len(missing)} positions...")
+        for pid, pos in missing:
+            try:
+                ed = await self._fetch_market_end_date(
+                    pos.get("market_id", ""),
+                    event_slug=pos.get("event_slug", ""),
+                    market_title=pos.get("market_title", ""),
+                )
+                if ed:
+                    pos["end_date"] = ed
+            except Exception:
+                pass
+        self.portfolio._save()
+
+    async def _detect_wallet(self):
+        """Fetch primary wallet from PolyCore for live trading."""
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"{config.POLYCORE_URL}/bots/{config.BOT_ID}",
+                    headers={"X-API-Key": config.API_KEY},
+                )
+                data = r.json()
+                wallets = data.get("wallets", [])
+                primary = next((w for w in wallets if w.get("role") == "primary"), wallets[0] if wallets else None)
+                if primary:
+                    config.WALLET_ID = primary["wallet_id"]
+                    print(f"[Wallet] Using {primary.get('label', 'unknown')} ({config.WALLET_ID[:8]}...)")
+                else:
+                    print("[Wallet] No wallet found! Live orders will fail.")
+        except Exception as e:
+            print(f"[Wallet] Detection failed: {e}")
+
+    async def _fetch_market_end_date(self, market_id: str, event_slug: str = "", market_title: str = "") -> str:
+        """Fetch market end date from Polymarket Gamma API."""
+        if not event_slug:
+            return ""
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"https://gamma-api.polymarket.com/events?slug={event_slug}")
+                data = r.json()
+                if isinstance(data, list) and data:
+                    event = data[0]
+                    # Try event-level endDate first
+                    event_end = event.get("endDate", "")
+                    # Find the specific market by matching title
+                    markets = event.get("markets", [])
+                    for m in markets:
+                        q = (m.get("question") or "").lower().strip()
+                        t = (market_title or "").lower().strip()
+                        if q and t and (q.startswith(t[:40]) or t.startswith(q[:40])):
+                            return m.get("endDate", "") or event_end
+                    # Fallback: return event-level endDate
+                    return event_end
+        except Exception:
+            pass
+        return ""
 
     async def _report_trade(self, market_id: str, side: str, size: float, price: float, market_title: str, outcome: str, token_id: str = None, event_slug: str = "", status: str = "open", pnl: float = None):
         """Report a paper trade to PolyCore. Deduped per (market, side, timestamp window)."""
@@ -295,9 +402,15 @@ class CarrotBot:
         side = trade.get("side", "BUY").upper()
         market_id = trade.get("market_id", "")
         token_id = trade.get("token_id", "")
-        event_slug = trade.get("event_slug", "")
+        event_slug = trade.get("event_slug", "") or trade.get("market_slug", "")
         market_title = trade.get("market_title", market_id[:40])
         price = float(trade.get("price", 0) or 0)
+
+        # Skip 5-minute / 15-minute markets — resolve too fast to copy
+        tl = market_title.lower()
+        if any(x in tl for x in ["up or down", "5min", "5 min", "15min", "15 min", "minute"]):
+            return
+
         if price <= 0 or price > 1:
             return
         outcome = trade.get("outcome", "YES")
@@ -313,7 +426,7 @@ class CarrotBot:
         size_usdc = round(whale_trade_size * config.COPY_RATIO, 2)
 
         if self._events_received % 20 == 1:
-            print(f"[Debug] {self._events_received} events, prob={prob*100:.0f}% whale=${whale_trade_size} copy=${size_usdc}")
+            print(f"[Debug] {self._events_received} events, prob={prob*100:.0f}% side={side} whale=${whale_trade_size} copy=${size_usdc} cash=${self.portfolio.cash:.2f} open={self.portfolio.open_count}")
         if size_usdc < config.MIN_STAKE_USDC:
             if size_usdc > 0.1:
                 pass  # too small — skip silently
@@ -332,32 +445,32 @@ class CarrotBot:
                 return
 
             shares = size_usdc / price  # convert USDC to outcome tokens
-            # Try to fill against live orderbook for up to 2 minutes
-            if config.DRY_RUN and token_id:
-                fill = await self._try_fill(token_id, "BUY", shares, price, market_title, timeout_sec=120)
-                if not fill.get("filled"):
-                    print(f"[Trade] SKIP BUY (fill timeout): {market_title[:40]} | {fill.get('reason','')}")
-                    return
-                else:
-                    print(f"[Trade] Fill OK at ask={fill.get('avg_fill_price')}")
+            if shares >= 15:
+                order_type = "GTC"  # limit order — min 15 shares
+            elif size_usdc >= 1:
+                order_type = "FOK"  # market order — min $1 value
+            else:
+                return  # can't meet either minimum
+            print(f"[Trade] BUY ${size_usdc:.2f} ({shares:.1f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
 
-            print(f"[Trade] BUY ${size_usdc:.2f} ({shares:.1f} sh @ {price:.4f}) | {market_title[:50]} | prob={prob*100:.0f}%")
-
-            self.portfolio.open(market_id=market_id, shares=shares, price=price,
-                               meta={"outcome": outcome, "market_title": market_title})
-            await self._report_trade(market_id, "BUY", size_usdc, price, market_title, outcome, token_id=token_id, event_slug=event_slug, status="open")
-
+            # Place order FIRST (speed critical for short-lived markets)
             if not config.DRY_RUN:
                 try:
                     await self._api("POST", "/clob/orders", {
                         "bot_id": config.BOT_ID,
+                        "wallet_id": config.WALLET_ID,
                         "token_id": trade.get("token_id", market_id),
                         "side": "BUY", "size": shares, "price": price,
-                        "order_type": "GTC", "market_id": market_id,
+                        "order_type": order_type, "market_id": market_id,
                         "outcome": outcome, "strategy": "carrot_ml",
-                    })
+                    }, timeout=30)
                 except Exception as e:
                     print(f"[Trade] Order fail: {e}")
+                    return  # don't open position if order failed
+
+            self.portfolio.open(market_id=market_id, shares=shares, price=price,
+                               meta={"outcome": outcome, "market_title": market_title, "event_slug": event_slug, "end_date": ""})
+            await self._report_trade(market_id, "BUY", size_usdc, price, market_title, outcome, token_id=token_id, event_slug=event_slug, status="open")
 
         else:  # SELL — only close existing positions in same market
             my_positions = [(pid, p) for pid, p in self.portfolio.positions.items()
@@ -367,22 +480,19 @@ class CarrotBot:
 
             pid, pos = my_positions[0]
             sell_shares = min(size_usdc / price, pos["shares"]) if price > 0 else pos["shares"]
+
+            # Determine order type based on share count
+            if sell_shares >= 15 and pos["shares"] >= 15:
+                order_type = "GTC"  # limit order — min 15 shares
+            elif pos["shares"] < 15 and pos["shares"] * price >= 1:
+                sell_shares = pos["shares"]  # close entire small position as market order
+                order_type = "FOK"  # market order — min $1 value
+            else:
+                return  # can't meet either minimum
+
             sell_usdc = sell_shares * price
 
-            # Try to fill against live orderbook for up to 2 minutes
-            if config.DRY_RUN and token_id:
-                fill = await self._try_fill(token_id, "SELL", sell_shares, price, market_title, timeout_sec=120)
-                if not fill.get("filled"):
-                    print(f"[Trade] SKIP SELL (fill timeout): {market_title[:40]} | {fill.get('reason','')}")
-                    return
-                else:
-                    print(f"[Trade] Fill OK at bid={fill.get('avg_fill_price')}")
-                    if fill.get("avg_fill_price") and fill["avg_fill_price"] != price:
-                        sell_shares = fill.get("filled_size", sell_shares)
-                        sell_usdc = sell_shares * fill["avg_fill_price"]
-                return
-
-            print(f"[Trade] SELL ${sell_usdc:.2f} ({sell_shares:.1f} sh @ {price:.4f}) | {market_title[:50]} | prob={prob*100:.0f}%")
+            print(f"[Trade] SELL ${sell_usdc:.2f} ({sell_shares:.1f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
 
             result = self.portfolio.close(pid, price, sell_shares)
             if result:
@@ -392,9 +502,10 @@ class CarrotBot:
                 try:
                     await self._api("POST", "/clob/orders", {
                         "bot_id": config.BOT_ID,
+                        "wallet_id": config.WALLET_ID,
                         "token_id": trade.get("token_id", market_id),
-                        "side": "SELL", "size": close_size / price, "price": price,
-                        "order_type": "GTC", "market_id": market_id,
+                        "side": "SELL", "size": sell_shares, "price": price,
+                        "order_type": order_type, "market_id": market_id,
                         "outcome": outcome, "strategy": "carrot_ml",
                     })
                 except Exception as e:
@@ -423,6 +534,13 @@ class CarrotBot:
                     self._last_resolved_count = resolved
                 else:
                     self._resolved_new = resolved - self._last_resolved_count
+                    # Force-stop stuck training (running >15min with 0 jobs)
+                    if self.trainer.running and self.trainer.total_completed == 0 and self.trainer.started_at:
+                        stuck_for = (datetime.now(timezone.utc) - self.trainer.started_at).total_seconds()
+                        if stuck_for > 900:
+                            print(f"[Retrain] Force-stopping stuck training ({stuck_for:.0f}s, 0 jobs)")
+                            self.trainer.stop()
+                            await asyncio.sleep(2)
                     if self._resolved_new >= config.RETRAIN_MIN_NEW and not self.trainer.running:
                         print(f"[Retrain] {self._resolved_new} new resolved trades (≥{config.RETRAIN_MIN_NEW}) → triggering")
                         self._last_resolved_count = resolved
@@ -451,28 +569,7 @@ class CarrotBot:
             await asyncio.sleep(1)
         return {"filled": False, "reason": f"Not filled after {timeout_sec}s"}
 
-    async def _stale_cleaner(self):
-        """Auto-close positions older than 2 minutes that never had a real fill."""
-        await asyncio.sleep(60)
-        while True:
-            try:
-                now = datetime.now(timezone.utc)
-                stale = [(pid, pos) for pid, pos in list(self.portfolio.positions.items())
-                         if (now - pos["opened_at"]).total_seconds() > 120]
-                for pid, pos in stale:
-                    result = self.portfolio.close(pid, pos["price"], pos["shares"])
-                    if result:
-                        await self._report_trade(
-                            pos["market_id"], "SELL",
-                            pos["shares"] * pos["price"], pos["price"],
-                            pos.get("market_title", ""),
-                            pos.get("outcome", "YES"),
-                            token_id=pos["market_id"],
-                            status="closed", pnl=0)
-                        print(f"[Stale] Closed {pos['market_id'][:20]}... after {(now - pos['opened_at']).total_seconds():.0f}s")
-            except Exception as e:
-                print(f"[Stale] Error: {e}")
-            await asyncio.sleep(30)
+    # ── Stale position cleaner (disabled — positions close only via whale SELL) ──
 
     # ── WebSocket ───────────────────────────────────────────────────────────
 
@@ -554,7 +651,312 @@ class CarrotBot:
                 await self._push_status()
             except Exception:
                 pass
+            # In live mode, sync real wallet balance periodically
+            if not config.DRY_RUN:
+                try:
+                    await self._sync_live_wallet()
+                except Exception:
+                    pass
             await asyncio.sleep(30)
+
+    async def _sync_live_wallet(self):
+        """Fetch real USDC balance, positions, and trades from PolyCore."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                h = {"X-API-Key": config.API_KEY}
+                base = config.POLYCORE_URL
+
+                # Balance (fast endpoint)
+                r = await client.get(f"{base}/clob/balance/{config.BOT_ID}", headers=h)
+                r.raise_for_status()
+                balance_raw = int(r.json().get("balance", {}).get("balance", 0))
+                self.portfolio.cash = round(balance_raw / 1_000_000, 4)
+                self.portfolio.initial_cash = self.portfolio.cash
+        except Exception:
+            pass
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                h = {"X-API-Key": config.API_KEY}
+                base = config.POLYCORE_URL
+                # Positions
+                r = await client.get(f"{base}/clob/positions/{config.BOT_ID}", headers=h)
+                r.raise_for_status()
+                self._live_positions = r.json().get("positions", [])
+                # Sync live positions into portfolio for SELL capability
+                self.portfolio.positions = {}
+                for i, lp in enumerate(self._live_positions):
+                    market_id = lp.get("market", "")
+                    if not market_id:
+                        continue
+                    shares = float(lp.get("size", 0))
+                    avg_price = float(lp.get("avg_price", 0))
+                    self.portfolio.positions[f"live_{i}"] = {
+                        "market_id": market_id,
+                        "shares": shares,
+                        "price": avg_price,
+                        "cost": shares * avg_price,
+                        "outcome": lp.get("outcome", "YES"),
+                        "market_title": lp.get("question", market_id[:40]),
+                        "event_slug": "",
+                        "end_date": "",
+                        "opened_at": datetime.now(timezone.utc),
+                    }
+                self.portfolio._save()
+                print(f"[Sync] {len(self._live_positions)} live positions, ${self.portfolio.cash:.2f} USDC")
+        except Exception:
+            pass
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                h = {"X-API-Key": config.API_KEY}
+                base = config.POLYCORE_URL
+                # Trades
+                r = await client.get(f"{base}/clob/trades/{config.BOT_ID}", headers=h, params={"limit": 200})
+                r.raise_for_status()
+                self._live_trades = r.json().get("trades", [])
+        except Exception:
+            pass
+
+    # ── State file dump (for dashboard) ──────────────────────────────────────
+
+    def _dump_state(self):
+        pf = self.portfolio
+        m = self.get_model()
+
+        # In live mode, use live data from PolyCore cache
+        if not config.DRY_RUN and hasattr(self, '_live_positions'):
+            positions = {}
+            for i, p in enumerate(self._live_positions):
+                positions[f"live_{i}"] = {
+                    "market_id": p.get("market", ""),
+                    "outcome": p.get("outcome", ""),
+                    "shares": float(p.get("size", 0)),
+                    "price": float(p.get("avg_price", 0)),
+                    "cost": float(p.get("size", 0)) * float(p.get("avg_price", 0)),
+                    "market_title": p.get("question", p.get("market", "")),
+                }
+            trade_history = []
+            for t in self._live_trades:
+                size = float(t.get("size", 0))
+                price = float(t.get("price", 0))
+                trade_history.append({
+                    "market_id": t.get("market", ""),
+                    "market_title": t.get("question", t.get("market", "")[:40]),
+                    "entry_price": price,
+                    "exit_price": price,
+                    "shares": size,
+                    "cost": size * price,
+                    "pnl": 0,
+                    "pnl_pct": 0,
+                    "closed": t.get("status") == "SETTLED",
+                    "closed_at": t.get("match_time", ""),
+                    "side": t.get("side", ""),
+                })
+            cash = round(pf.cash, 4)
+            total_invested = round(sum(p.get("size", 0) * p.get("avg_price", 0) for p in positions), 4)
+            total_pnl = round(sum(t.get("pnl", 0) or 0 for t in trade_history if t.get("status") == "SETTLED"), 4)
+            total_trades = len(trade_history)
+        else:
+            positions = {pid: {k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in p.items()} for pid, p in pf.positions.items()}
+            trade_history = [{k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in t.items()} for t in pf.trade_history[-200:]]
+            cash = round(pf.cash, 4)
+            total_invested = round(pf.total_invested, 4)
+            total_pnl = round(pf.total_pnl, 4)
+            total_trades = pf.total_trades
+
+        state = {
+            "portfolio": {
+                "cash": cash,
+                "initial_cash": pf.initial_cash,
+                "total_invested": total_invested,
+                "total_pnl": total_pnl,
+                "open_count": len(positions),
+                "total_trades": total_trades,
+                "positions": positions,
+                "trade_history": trade_history,
+            },
+            "model": {
+                "version": m.version,
+                "accuracy": round(m.accuracy, 4) if m.accuracy else None,
+                "brier_score": round(m.brier_score, 4) if m.brier_score else None,
+                "has_model": m.model is not None,
+            },
+            "training": {
+                "running": self.trainer.running,
+                "jobs_active": self.trainer.jobs_active,
+                "total_completed": self.trainer.total_completed,
+                "best_accuracy": round(self.trainer.best_metrics.get("accuracy", 0), 4) if self.trainer.best_metrics else None,
+                "best_brier": round(self.trainer.best_metrics.get("brier", 0), 4) if self.trainer.best_metrics else None,
+            },
+            "config": {
+                "DRY_RUN": config.DRY_RUN,
+                "INITIAL_BUDGET": config.INITIAL_BUDGET,
+                "COPY_RATIO": config.COPY_RATIO,
+                "MAX_CASH_PER_TRADE": config.MAX_CASH_PER_TRADE,
+                "MIN_STAKE_USDC": config.MIN_STAKE_USDC,
+                "CONFIDENCE_THRESHOLD": config.CONFIDENCE_THRESHOLD,
+                "TARGET_ACCURACY": config.TARGET_ACCURACY,
+                "MAX_TRAIN_JOBS": config.MAX_TRAIN_JOBS,
+                "TRAIN_MAX_ITER": config.TRAIN_MAX_ITER,
+                "WHALE_FILTER": config.WHALE_FILTER,
+                "AUTO_TRAIN": config.AUTO_TRAIN,
+                "AUTO_RETRAIN": config.AUTO_RETRAIN,
+                "RETRAIN_MIN_NEW": config.RETRAIN_MIN_NEW,
+            },
+            "wallet": {
+                "wallet_id": config.WALLET_ID,
+                "balance_usdc": round(pf.cash, 4),
+                "address": "got.more.money" if config.WALLET_ID else "",
+            },
+            "status": {
+                "uptime": self._uptime_str(),
+                "last_prediction": self.last_prediction,
+                "total_predictions": self.total_predictions,
+                "events_received": self._events_received,
+                "resolved_new": self._resolved_new,
+                "mode": "DRY RUN" if config.DRY_RUN else "LIVE",
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            fpath = Path("/var/www/html/carrot") / "state.json"
+            with open(fpath, "w") as f:
+                json.dump(state, f, indent=2, default=str)
+            os.chmod(fpath, 0o644)
+        except Exception:
+            pass
+        try:
+            epath = Path("/var/www/html/carrot") / "env.json"
+            env_vars = {k: v for k, v in vars(config).items()
+                        if not k.startswith("_") and k.isupper() and isinstance(v, (str, int, float, bool))}
+            with open(epath, "w") as f:
+                json.dump(env_vars, f, indent=2, default=str)
+            os.chmod(epath, 0o644)
+        except Exception:
+            pass
+
+    def _dump_history(self):
+        try:
+            pf = self.portfolio
+            m = self.get_model()
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "cash": round(pf.cash, 4),
+                "invested": round(pf.total_invested, 4),
+                "value": round(pf.cash + pf.total_invested, 4),
+                "pnl": round(pf.total_pnl, 4),
+                "positions": pf.open_count,
+                "trades": pf.total_trades,
+                "accuracy": round(m.accuracy, 4) if m.accuracy else None,
+                "model_version": m.version,
+                "training": self.trainer.running,
+            }
+            self.persist.save_history_snapshot(entry)
+            self.persist.trim_history(500)
+        except Exception:
+            pass
+
+    async def _state_dump_loop(self):
+        await asyncio.sleep(10)
+        dump_count = 0
+        while True:
+            try:
+                self._dump_state()
+            except Exception as e:
+                print(f"[Dump] State dump failed: {type(e).__name__}: {e}")
+            try:
+                await self._check_command_file()
+            except Exception:
+                pass
+            dump_count += 1
+            if dump_count % 4 == 0:
+                try:
+                    self._dump_history()
+                except Exception as e:
+                    print(f"[Dump] History dump failed: {type(e).__name__}: {e}")
+            await asyncio.sleep(15)
+
+    # ── Command file watcher (for dashboard control) ─────────────────────────
+
+    async def _check_command_file(self):
+        cmd_path = Path("/tmp/carrot_command.json")
+        try:
+            if cmd_path.exists():
+                content = cmd_path.read_text()
+                data = json.loads(content)
+                action = data.get("command", "")
+                if action:
+                    print(f"[Dashboard] Command: {action}")
+                    await self._handle_action(action)
+                cmd_path.unlink(missing_ok=True)
+        except Exception as e:
+            print(f"[Dashboard] Command error: {e}")
+            try:
+                cmd_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    @property
+    def _state(self) -> dict:
+        pf = self.portfolio
+        m = self.get_model()
+        sa = self.trainer.started_at
+        return {
+            "portfolio": {
+                "cash": round(pf.cash, 4),
+                "initial_cash": pf.initial_cash,
+                "total_invested": round(pf.total_invested, 4),
+                "total_pnl": round(pf.total_pnl, 4),
+                "open_count": pf.open_count,
+                "total_trades": pf.total_trades,
+                "positions": {
+                    pid: {k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in p.items()}
+                    for pid, p in pf.positions.items()
+                },
+                "trade_history": [
+                    {k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in t.items()}
+                    for t in pf.trade_history[-200:]
+                ],
+            },
+            "model": {
+                "version": m.version,
+                "accuracy": round(m.accuracy, 4) if m.accuracy else None,
+                "brier_score": round(m.brier_score, 4) if m.brier_score else None,
+                "has_model": m.model is not None,
+            },
+            "training": {
+                "running": self.trainer.running,
+                "jobs_active": self.trainer.jobs_active,
+                "total_completed": self.trainer.total_completed,
+                "best_accuracy": round(self.trainer.best_metrics.get("accuracy", 0), 4) if self.trainer.best_metrics else None,
+                "best_brier": round(self.trainer.best_metrics.get("brier", 0), 4) if self.trainer.best_metrics else None,
+                "started_at": str(sa) if sa else None,
+                "elapsed": str(datetime.now(timezone.utc) - sa).split('.')[0] if sa and self.trainer.running else None,
+            },
+            "config": {
+                "DRY_RUN": config.DRY_RUN,
+                "INITIAL_BUDGET": config.INITIAL_BUDGET,
+                "COPY_RATIO": config.COPY_RATIO,
+                "MAX_CASH_PER_TRADE": config.MAX_CASH_PER_TRADE,
+                "MIN_STAKE_USDC": config.MIN_STAKE_USDC,
+                "CONFIDENCE_THRESHOLD": config.CONFIDENCE_THRESHOLD,
+                "TARGET_ACCURACY": config.TARGET_ACCURACY,
+                "MAX_TRAIN_JOBS": config.MAX_TRAIN_JOBS,
+                "TRAIN_MAX_ITER": config.TRAIN_MAX_ITER,
+                "WHALE_FILTER": config.WHALE_FILTER,
+                "AUTO_TRAIN": config.AUTO_TRAIN,
+                "AUTO_RETRAIN": config.AUTO_RETRAIN,
+                "RETRAIN_MIN_NEW": config.RETRAIN_MIN_NEW,
+            },
+            "status": {
+                "uptime": self._uptime_str(),
+                "last_prediction": self.last_prediction,
+                "total_predictions": self.total_predictions,
+                "events_received": self._events_received,
+                "resolved_new": self._resolved_new,
+                "mode": "DRY RUN" if config.DRY_RUN else "LIVE",
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
     # ── Main ────────────────────────────────────────────────────────────────
 
@@ -564,10 +966,17 @@ class CarrotBot:
 
         self.get_model().load(config.MODEL_DIR / "best_model.pkl")
 
+        # Re-fetch end_dates for positions missing them
+        await self._fix_missing_end_dates()
+
         try:
             await self._declare_panel()
         except Exception as e:
             print(f"[Panel] Declare failed: {e}")
+
+        # Auto-detect wallet from PolyCore
+        if not config.WALLET_ID and not config.DRY_RUN:
+            await self._detect_wallet()
 
         if config.AUTO_TRAIN:
             print("[Trainer] Auto-train enabled")
@@ -579,7 +988,7 @@ class CarrotBot:
 
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
         self._tasks.append(asyncio.create_task(self._status_loop()))
-        self._tasks.append(asyncio.create_task(self._stale_cleaner()))
+        self._tasks.append(asyncio.create_task(self._state_dump_loop()))
         await self._ws_loop()
 
 
@@ -589,6 +998,11 @@ def main():
     def _shutdown():
         print("\n[Carrot] Shutting down...")
         bot.trainer.stop()
+        try:
+            bot.portfolio._save()
+            print("[Carrot] Portfolio saved to DB")
+        except Exception as e:
+            print(f"[Carrot] DB save on shutdown failed: {e}")
         for t in bot._tasks:
             t.cancel()
 

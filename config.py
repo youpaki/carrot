@@ -31,6 +31,7 @@ WHALE_FILTER        = get("WHALE_FILTER", "")
 AUTO_TRAIN          = get("AUTO_TRAIN", "true").lower() == "true"
 AUTO_RETRAIN        = get("AUTO_RETRAIN", "true").lower() == "true"
 RETRAIN_MIN_NEW     = int(get("RETRAIN_MIN_NEW", "5000"))
+WALLET_ID           = get("WALLET_ID", "")
 
 MODEL_DIR = Path(__file__).parent / "models"
 MODEL_DIR.mkdir(exist_ok=True)

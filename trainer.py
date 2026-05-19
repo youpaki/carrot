@@ -109,8 +109,20 @@ class TrainingManager:
         """Main training loop. Runs until target accuracy or max iterations."""
         self.running = True
         self.total_completed = 0
+        self.started_at = datetime.now(timezone.utc)
 
-        X_train, y_train, X_test, y_test = await self.fetch_data()
+        try:
+            X_train, y_train, X_test, y_test = await asyncio.wait_for(
+                self.fetch_data(), timeout=120
+            )
+        except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+            print(f"[Trainer] Data fetch timed out. Will retry later.")
+            self.running = False
+            return
+        except Exception as e:
+            print(f"[Trainer] Data fetch error: {type(e).__name__}: {e}")
+            self.running = False
+            return
         if X_train is None or len(X_train) < 50:
             print(f"[Trainer] Not enough data: {len(X_train) if X_train is not None else 0} samples")
             self.running = False
@@ -129,11 +141,18 @@ class TrainingManager:
         # Submit initial batch
         for params in param_list[:config.MAX_TRAIN_JOBS]:
             futures[self._executor.submit(_train_job, X_train, y_train, X_test, y_test, params)] = params
+        self.jobs_active = len(futures)
 
         next_idx = config.MAX_TRAIN_JOBS
         completed = 0
 
+        max_duration = 600  # 10 min total training timeout
+        started = time.time()
         while futures and self.running:
+            if time.time() - started > max_duration:
+                print(f"[Trainer] Total training timeout ({max_duration}s) reached.")
+                self.running = False
+                break
             done = []
             try:
                 for fut in as_completed(futures.keys(), timeout=2):
