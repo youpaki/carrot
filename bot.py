@@ -179,12 +179,12 @@ class CarrotBot:
 
     # ── HTTP helpers ────────────────────────────────────────────────────────
 
-    async def _api(self, method, path, body=None, params=None, timeout=15):
+    async def _api(self, method, path, body=None, params=None, timeout=60):
         url = f"{config.POLYCORE_URL}{path}"
         h = {"X-API-Key": config.API_KEY, "Content-Type": "application/json"}
         try:
             if self.httpx_client is None:
-                self.httpx_client = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+                self.httpx_client = httpx.AsyncClient(timeout=60, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
             r = await self.httpx_client.request(method, url, json=body, params=params, headers=h, timeout=timeout)
             if r.status_code >= 400:
                 detail = r.text[:500]
@@ -468,7 +468,7 @@ class CarrotBot:
                         "side": "BUY", "size": shares, "price": price,
                         "order_type": order_type, "market_id": market_id,
                         "outcome": outcome, "strategy": "carrot_ml",
-                    }, timeout=30)
+                    }, timeout=60)
                 except Exception as e:
                     print(f"[Trade] Order fail: {e}")
                     return  # don't open position if order failed
@@ -583,7 +583,7 @@ class CarrotBot:
         url = f"{config.WS_URL}/{config.API_KEY}"
         while True:
             try:
-                async with websockets.connect(url, ping_interval=30, ping_timeout=60, open_timeout=30, close_timeout=10) as ws:
+                async with websockets.connect(url, ping_interval=30, ping_timeout=60, open_timeout=60, close_timeout=10) as ws:
                     print("[WS] Connected")
                     async for raw in ws:
                         try:
@@ -672,7 +672,7 @@ class CarrotBot:
     async def _sync_live_wallet(self):
         """Fetch real USDC balance, positions, and trades from PolyCore."""
         if self.httpx_client is None:
-            self.httpx_client = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+            self.httpx_client = httpx.AsyncClient(timeout=60, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
         client = self.httpx_client
         h = {"X-API-Key": config.API_KEY}
         base = config.POLYCORE_URL
@@ -729,7 +729,7 @@ class CarrotBot:
     async def _sync_real_portfolio(self):
         """Fetch real portfolio value from Polymarket data-api."""
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=60) as client:
                 r = await client.get(
                     "https://data-api.polymarket.com/positions",
                     params={"user": "0xD1002995F2D536C6977364347E111472e5E65D09", "sizeThreshold": 0, "limit": 200},
