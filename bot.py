@@ -663,6 +663,10 @@ class CarrotBot:
                     await self._sync_live_wallet()
                 except Exception:
                     pass
+                try:
+                    await self._sync_real_portfolio()
+                except Exception:
+                    pass
             await asyncio.sleep(30)
 
     async def _sync_live_wallet(self):
@@ -722,6 +726,36 @@ class CarrotBot:
         except Exception:
             pass
 
+    async def _sync_real_portfolio(self):
+        """Fetch real portfolio value from Polymarket data-api."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(
+                    "https://data-api.polymarket.com/positions",
+                    params={"user": "0xD1002995F2D536C6977364347E111472e5E65D09", "sizeThreshold": 0, "limit": 200},
+                )
+                positions = r.json()
+                real_value = sum(p.get("currentValue", 0) for p in positions)
+                real_cost = sum(p.get("initialValue", 0) for p in positions)
+                real_pnl = sum(p.get("cashPnl", 0) for p in positions)
+                active = [p for p in positions if float(p.get("currentValue", 0)) > 0]
+                self._real_portfolio = {
+                    "value": round(real_value, 2),
+                    "cost": round(real_cost, 2),
+                    "pnl": round(real_pnl, 2),
+                    "active_count": len(active),
+                    "positions": [{
+                        "market": p.get("title", "")[:60],
+                        "outcome": p.get("outcome", ""),
+                        "size": float(p.get("size", 0)),
+                        "avg_price": float(p.get("avgPrice", 0)),
+                        "current_value": float(p.get("currentValue", 0)),
+                        "pnl": float(p.get("cashPnl", 0)),
+                    } for p in active[:15]],
+                }
+        except Exception as e:
+            print(f"[Sync] Real portfolio fetch failed: {type(e).__name__}: {e}")
+
     # ── State file dump (for dashboard) ──────────────────────────────────────
 
     def _dump_state(self):
@@ -772,8 +806,14 @@ class CarrotBot:
                 })
 
             cash = round(pf.cash, 4)
-            total_invested = round(sum(p.get("cost", 0) for p in positions.values()), 4)
-            total_pnl = round(sum(max(0, p.get("shares", 0) * p.get("price", 0) - p.get("cost", 0)) for p in positions.values()), 4)
+            # Use real portfolio data from Polymarket if available
+            rp = getattr(self, '_real_portfolio', None)
+            if rp:
+                total_invested = rp["value"]
+                total_pnl = rp["pnl"]
+            else:
+                total_invested = round(sum(p.get("cost", 0) for p in positions.values()), 4)
+                total_pnl = 0
             total_trades = len(self._live_trades) if self._live_trades else 0
         else:
             positions = {pid: {k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in p.items()} for pid, p in pf.positions.items()}
