@@ -747,29 +747,39 @@ class CarrotBot:
                     "cost": round(cst, 4),
                     "market_title": p.get("question", p.get("market", "")),
                 }
+
+            # Build trade history from recent CLOB trades (last 20)
+            recent_trades = self._live_trades[:20] if self._live_trades else []
             trade_history = []
-            for t in self._live_trades:
+            for t in recent_trades:
                 if not isinstance(t, dict):
                     continue
                 size = float(t.get("size", 0))
                 price = float(t.get("price", 0))
+                cost = round(size * price, 4)
                 trade_history.append({
                     "market_id": t.get("market", ""),
                     "market_title": t.get("question", t.get("market", "")[:40]),
                     "entry_price": price,
                     "exit_price": price,
                     "shares": size,
-                    "cost": size * price,
+                    "cost": cost,
                     "pnl": 0,
                     "pnl_pct": 0,
-                    "closed": t.get("status") == "SETTLED",
+                    "closed": t.get("status") in ("SETTLED", "MATCHED"),
                     "closed_at": t.get("match_time", ""),
                     "side": t.get("side", ""),
                 })
+
             cash = round(pf.cash, 4)
             total_invested = round(sum(p.get("cost", 0) for p in positions.values()), 4)
-            total_pnl = round(sum(t.get("pnl", 0) or 0 for t in trade_history if t.get("status") == "SETTLED"), 4)
-            total_trades = len(trade_history)
+            # Unrealized PnL: estimate current value using avg_price (positions are recent)
+            total_unrealized = round(sum(
+                max(0, p.get("shares", 0) * p.get("price", 0) - p.get("cost", 0))
+                for p in positions.values()
+            ), 4)
+            total_pnl = total_unrealized
+            total_trades = len(self._live_trades) if self._live_trades else 0
         else:
             positions = {pid: {k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in p.items()} for pid, p in pf.positions.items()}
             trade_history = [{k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in t.items()} for t in pf.trade_history[-200:]]
