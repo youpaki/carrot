@@ -667,58 +667,58 @@ class CarrotBot:
 
     async def _sync_live_wallet(self):
         """Fetch real USDC balance, positions, and trades from PolyCore."""
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                h = {"X-API-Key": config.API_KEY}
-                base = config.POLYCORE_URL
+        if self.httpx_client is None:
+            self.httpx_client = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+        client = self.httpx_client
+        h = {"X-API-Key": config.API_KEY}
+        base = config.POLYCORE_URL
 
-                # Balance (fast endpoint)
-                r = await client.get(f"{base}/clob/balance/{config.BOT_ID}", headers=h)
-                r.raise_for_status()
-                balance_raw = int(r.json().get("balance", {}).get("balance", 0))
-                self.portfolio.cash = round(balance_raw / 1_000_000, 4)
-                self.portfolio.initial_cash = self.portfolio.cash
+        # Balance (fast endpoint)
+        try:
+            r = await client.get(f"{base}/clob/balance/{config.BOT_ID}", headers=h)
+            r.raise_for_status()
+            balance_raw = int(r.json().get("balance", {}).get("balance", 0))
+            self.portfolio.cash = round(balance_raw / 1_000_000, 4)
+            self.portfolio.initial_cash = self.portfolio.cash
         except Exception:
             pass
+
+        # Positions
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                h = {"X-API-Key": config.API_KEY}
-                base = config.POLYCORE_URL
-                # Positions
-                r = await client.get(f"{base}/clob/positions/{config.BOT_ID}", headers=h)
-                r.raise_for_status()
-                self._live_positions = r.json().get("positions", [])
-                # Sync live positions into portfolio for SELL capability
-                self.portfolio.positions = {}
-                for i, lp in enumerate(self._live_positions):
-                    market_id = lp.get("market", "")
-                    if not market_id:
-                        continue
-                    shares = float(lp.get("size", 0))
-                    avg_price = float(lp.get("avg_price", 0))
-                    self.portfolio.positions[f"live_{i}"] = {
-                        "market_id": market_id,
-                        "shares": shares,
-                        "price": avg_price,
-                        "cost": shares * avg_price,
-                        "outcome": lp.get("outcome", "YES"),
-                        "market_title": lp.get("question", market_id[:40]),
-                        "event_slug": "",
-                        "end_date": "",
-                        "opened_at": datetime.now(timezone.utc),
-                    }
-                self.portfolio._save()
-                print(f"[Sync] {len(self._live_positions)} live positions, ${self.portfolio.cash:.2f} USDC")
-        except Exception:
-            pass
+            r = await client.get(f"{base}/clob/positions/{config.BOT_ID}", headers=h)
+            r.raise_for_status()
+            self._live_positions = r.json().get("positions", [])
+            self.portfolio.positions = {}
+            for i, lp in enumerate(self._live_positions):
+                market_id = lp.get("market", "")
+                if not market_id:
+                    continue
+                shares = float(lp.get("size", 0))
+                avg_price = float(lp.get("avg_price", 0))
+                cost = float(lp.get("cost", 0)) if lp.get("cost") else shares * avg_price
+                if shares <= 0 or cost <= 0:
+                    continue
+                self.portfolio.positions[f"live_{i}"] = {
+                    "market_id": market_id,
+                    "shares": shares,
+                    "price": avg_price,
+                    "cost": round(cost, 4),
+                    "outcome": lp.get("outcome", "YES"),
+                    "market_title": lp.get("question", market_id[:40]),
+                    "event_slug": "",
+                    "end_date": "",
+                    "opened_at": datetime.now(timezone.utc),
+                }
+            self.portfolio._save()
+            print(f"[Sync] {len(self.portfolio.positions)} positions, ${self.portfolio.cash:.2f} USDC")
+        except Exception as e:
+            print(f"[Sync] Positions failed: {type(e).__name__}")
+
+        # Trades
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                h = {"X-API-Key": config.API_KEY}
-                base = config.POLYCORE_URL
-                # Trades
-                r = await client.get(f"{base}/clob/trades/{config.BOT_ID}", headers=h, params={"limit": 200})
-                r.raise_for_status()
-                self._live_trades = r.json().get("trades", [])
+            r = await client.get(f"{base}/clob/trades/{config.BOT_ID}", headers=h, params={"limit": 200})
+            r.raise_for_status()
+            self._live_trades = r.json().get("trades", [])
         except Exception:
             pass
 
