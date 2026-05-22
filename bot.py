@@ -743,12 +743,15 @@ class CarrotBot:
                     "pnl": round(real_pnl, 2),
                     "active_count": len(active),
                     "positions": [{
-                        "market": p.get("title", "")[:60],
+                        "market_title": p.get("title", "")[:60],
                         "outcome": p.get("outcome", ""),
-                        "size": float(p.get("size", 0)),
-                        "avg_price": float(p.get("avgPrice", 0)),
+                        "shares": float(p.get("size", 0)),
+                        "price": float(p.get("avgPrice", 0)),
+                        "cost": round(float(p.get("size", 0)) * float(p.get("avgPrice", 0)), 4),
                         "current_value": float(p.get("currentValue", 0)),
                         "pnl": float(p.get("cashPnl", 0)),
+                        "end_date": "",
+                        "opened_at": "",
                     } for p in active[:15]],
                 }
         except Exception as e:
