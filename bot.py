@@ -682,7 +682,6 @@ class CarrotBot:
             r.raise_for_status()
             balance_raw = int(r.json().get("balance", {}).get("balance", 0))
             self.portfolio.cash = round(balance_raw / 1_000_000, 4)
-            self.portfolio.initial_cash = self.portfolio.cash
         except Exception:
             pass
 
@@ -753,6 +752,7 @@ class CarrotBot:
                     } for p in active[:15]],
                 }
         except Exception as e:
+            print(f"[Sync] Real portfolio: {len(active)} positions, value=${real_value:.2f}, pnl=${real_pnl:.2f}")
             print(f"[Sync] Real portfolio fetch failed: {type(e).__name__}: {e}")
 
     # ── State file dump (for dashboard) ──────────────────────────────────────
