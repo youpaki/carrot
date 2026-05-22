@@ -882,13 +882,16 @@ class CarrotBot:
         try:
             pf = self.portfolio
             m = self.get_model()
+            rp = getattr(self, "_real_portfolio", None)
+            invested = rp["value"] if rp else round(pf.total_invested, 4)
+            pnl = round((pf.cash + invested) - pf.initial_cash, 2)
             entry = {
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "cash": round(pf.cash, 4),
-                "invested": round(pf.total_invested, 4),
-                "value": round(pf.cash + pf.total_invested, 4),
-                "pnl": round(pf.total_pnl, 4),
-                "positions": pf.open_count,
+                "invested": invested,
+                "value": round(pf.cash + invested, 4),
+                "pnl": pnl,
+                "positions": rp["active_count"] if rp else pf.open_count,
                 "trades": pf.total_trades,
                 "accuracy": round(m.accuracy, 4) if m.accuracy else None,
                 "model_version": m.version,
