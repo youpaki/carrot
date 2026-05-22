@@ -769,7 +769,7 @@ class CarrotBot:
             if rp:
                 cash = round(pf.cash, 4)
                 total_invested = rp["value"]
-                total_pnl = rp["pnl"]
+                total_pnl = round((pf.cash + rp["value"]) - pf.initial_cash, 2)
                 total_trades = len(self._live_trades) if self._live_trades else 0
                 positions = {f"rp_{i}": p for i, p in enumerate(rp.get("positions", []))}
                 trade_history = []
