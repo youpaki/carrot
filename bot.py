@@ -48,8 +48,7 @@ class Portfolio:
         data = self.persist.load_portfolio()
         if data["cash"] is not None:
             self.cash = data["cash"]
-        if data["initial_cash"] is not None:
-            self.initial_cash = data["initial_cash"]
+        # initial_cash always from .env config, not DB
         self.total_trades = data["total_trades"]
         # In live mode, don't load old paper positions — PolyCore is source of truth
         if not config.DRY_RUN:
