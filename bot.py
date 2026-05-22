@@ -178,12 +178,12 @@ class CarrotBot:
 
     # ── HTTP helpers ────────────────────────────────────────────────────────
 
-    async def _api(self, method, path, body=None, params=None, timeout=60):
+    async def _api(self, method, path, body=None, params=None, timeout=15):
         url = f"{config.POLYCORE_URL}{path}"
         h = {"X-API-Key": config.API_KEY, "Content-Type": "application/json"}
         try:
             if self.httpx_client is None:
-                self.httpx_client = httpx.AsyncClient(timeout=60, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+                self.httpx_client = httpx.AsyncClient(timeout=15, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
             r = await self.httpx_client.request(method, url, json=body, params=params, headers=h, timeout=timeout)
             if r.status_code >= 400:
                 detail = r.text[:500]
@@ -671,7 +671,7 @@ class CarrotBot:
     async def _sync_live_wallet(self):
         """Fetch real USDC balance, positions, and trades from PolyCore."""
         if self.httpx_client is None:
-            self.httpx_client = httpx.AsyncClient(timeout=60, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+            self.httpx_client = httpx.AsyncClient(timeout=15, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
         client = self.httpx_client
         h = {"X-API-Key": config.API_KEY}
         base = config.POLYCORE_URL
