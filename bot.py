@@ -177,7 +177,7 @@ class CarrotBot:
 
         # ── Risk management ──────────────────────────────────────────────────
         self._stopped = False               # stop-loss tripped
-        self._stop_loss_pct = -0.20         # -20% of initial budget → halt
+        self._stop_loss_pct = -0.80         # -80% of initial budget → halt
         self._daily_drawdown_pct = -0.15    # -15% in a day → halt 24h
         self._day_start_value = None        # portfolio value at start of day
         self._daily_stop_until = None       # timestamp when daily halt ends
@@ -488,9 +488,13 @@ class CarrotBot:
                 order_type = "FOK"  # market order — min $1 value
             else:
                 return  # can't meet either minimum
-            # CLOB requires: taker amount ≤4 decimals, maker amount ≤2 decimals
-            shares = round(shares, 4)
-            maker_usdc = round(shares * price, 2)
+            # CLOB precision: GTC limit: shares≤2dec, FOK market: USD≤2dec
+            if order_type == "GTC":
+                shares = round(shares, 2)
+                maker_usdc = round(shares * price, 2)
+            else:
+                shares = round(shares, 4)
+                maker_usdc = round(shares * price, 2)
             if maker_usdc < 1:
                 return  # below minimum
             print(f"[Trade] BUY ${maker_usdc:.2f} ({shares:.4f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
@@ -532,7 +536,10 @@ class CarrotBot:
             else:
                 return  # can't meet either minimum
 
-            sell_shares = round(sell_shares, 4)
+            if order_type == "GTC":
+                sell_shares = round(sell_shares, 2)
+            else:
+                sell_shares = round(sell_shares, 4)
             sell_usdc = round(sell_shares * price, 2)
 
             print(f"[Trade] SELL ${sell_usdc:.2f} ({sell_shares:.1f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
