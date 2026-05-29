@@ -629,7 +629,7 @@ class CarrotBot:
         await asyncio.sleep(120)  # settle after startup
         while True:
             try:
-                resp = await self._api("GET", "/tracker/export/manifest")
+                resp = await self._api("GET", "/tracker/export/manifest", timeout=30)
                 resolved = int(resp.get("summary", {}).get("resolved_rows", 0) or 0)
                 if self._last_resolved_count == 0:
                     self._last_resolved_count = resolved
