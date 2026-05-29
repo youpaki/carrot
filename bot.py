@@ -815,6 +815,11 @@ class CarrotBot:
                     "opened_at": datetime.now(timezone.utc),
                 }
             self.portfolio._save()
+            # Re-evaluate risk limits after sync (PnL may have recovered)
+            pnl_pct = self.portfolio.total_pnl_pct
+            if self._stopped and pnl_pct > self._stop_loss_pct + 0.05:
+                print(f"[Risk] Stop-loss cleared (PnL recovered to {pnl_pct*100:.1f}%)")
+                self._stopped = False
             print(f"[Sync] {len(self.portfolio.positions)} positions, ${self.portfolio.cash:.2f} USDC")
         except Exception as e:
             print(f"[Sync] Positions failed: {type(e).__name__}")
