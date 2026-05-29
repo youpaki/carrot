@@ -16,7 +16,7 @@ import sys
 import time
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -78,6 +78,14 @@ class Portfolio:
     def open_count(self) -> int:
         return len(self.positions)
 
+    @property
+    def total_value(self) -> float:
+        return self.cash + self.total_invested
+
+    @property
+    def total_pnl_pct(self) -> float:
+        return (self.total_value - self.initial_cash) / self.initial_cash if self.initial_cash > 0 else 0
+
     def open(self, market_id: str, shares: float, price: float, meta: dict = None) -> dict:
         """Open a position. shares = number of outcome tokens. cost = shares * price."""
         cost = shares * price
@@ -90,6 +98,7 @@ class Portfolio:
             "market_title": meta.get("market_title", "") if meta else "",
             "event_slug": meta.get("event_slug", "") if meta else "",
             "end_date": meta.get("end_date", "") if meta else "",
+            "whale_address": meta.get("whale_address", "") if meta else "",
             "opened_at": datetime.now(timezone.utc),
         }
         # Merge with existing same-market BUY position
@@ -165,6 +174,14 @@ class CarrotBot:
         self._tasks = []
         self._live_positions = []
         self._live_trades = []
+
+        # ── Risk management ──────────────────────────────────────────────────
+        self._stopped = False               # stop-loss tripped
+        self._stop_loss_pct = -0.20         # -20% of initial budget → halt
+        self._daily_drawdown_pct = -0.15    # -15% in a day → halt 24h
+        self._day_start_value = None        # portfolio value at start of day
+        self._daily_stop_until = None       # timestamp when daily halt ends
+        self._whale_positions: dict[str, int] = {}  # whale_addr -> open position count
 
     # ── Model hot-swap (thread-safe) ───────────────────────────────────────
 
@@ -391,6 +408,10 @@ class CarrotBot:
         if not model.model:
             return  # no trained model yet
 
+        # Risk limit check: stop-loss, daily drawdown
+        if not self._check_risk_limits():
+            return
+
         features = encode_event(data, self.whale_cache)
         X = features_array(features)
         prob = model.predict_proba(X)
@@ -418,6 +439,23 @@ class CarrotBot:
         self.total_predictions += 1
 
         if prob < config.CONFIDENCE_THRESHOLD:
+            return
+
+        # Whale trust filter: skip whales with low trust scores
+        whale_addr = data.get("whale_address", "")
+        if whale_addr:
+            wc = self.whale_cache.get(whale_addr, {})
+            trust = float(wc.get("trust_score", 0.5) or 0.5)
+            if trust < 0.3:
+                return  # low-trust whales get ignored
+
+        # Per-whale position cap: max 1 open position per whale
+        if whale_addr and self._count_whale_positions(whale_addr) >= 1:
+            return
+
+        # Market category filter: skip catch-all "other" category (3)
+        market_cat = features.get("market_category_id", 3)
+        if market_cat == 3:
             return
 
         # Dynamic position sizing: copy a fraction of what the whale put in
@@ -473,7 +511,7 @@ class CarrotBot:
                     return  # don't open position if order failed
 
             self.portfolio.open(market_id=market_id, shares=shares, price=price,
-                               meta={"outcome": outcome, "market_title": market_title, "event_slug": event_slug, "end_date": ""})
+                               meta={"outcome": outcome, "market_title": market_title, "event_slug": event_slug, "end_date": "", "whale_address": whale_addr})
             await self._report_trade(market_id, "BUY", size_usdc, price, market_title, outcome, token_id=token_id, event_slug=event_slug, status="open")
 
         else:  # SELL — only close existing positions in same market
@@ -499,10 +537,7 @@ class CarrotBot:
 
             print(f"[Trade] SELL ${sell_usdc:.2f} ({sell_shares:.1f} sh @ {price:.4f}) {order_type} | {market_title[:50]} | prob={prob*100:.0f}%")
 
-            result = self.portfolio.close(pid, price, sell_shares)
-            if result:
-                await self._report_trade(market_id, "SELL", sell_usdc, price, market_title, outcome, token_id=token_id, event_slug=event_slug, status="closed", pnl=result["pnl"])
-
+            # Place API order FIRST, then close local position (atomic-like)
             if not config.DRY_RUN:
                 try:
                     await self._api("POST", "/clob/orders", {
@@ -514,7 +549,68 @@ class CarrotBot:
                         "outcome": outcome, "strategy": "carrot_ml",
                     })
                 except Exception as e:
-                    print(f"[Trade] Order fail: {e}")
+                    print(f"[Trade] Order fail (local close skipped): {e}")
+                    return  # don't close local position if API order failed
+
+            result = self.portfolio.close(pid, price, sell_shares)
+            if result:
+                await self._report_trade(market_id, "SELL", sell_usdc, price, market_title, outcome, token_id=token_id, event_slug=event_slug, status="closed", pnl=result["pnl"])
+
+    # ── Risk management ─────────────────────────────────────────────────────
+
+    def _check_risk_limits(self) -> bool:
+        """Returns True if trading is allowed. Prints reason if blocked."""
+        # Stop-loss: total PnL below -20%
+        pnl_pct = self.portfolio.total_pnl_pct
+        if pnl_pct <= self._stop_loss_pct:
+            if not self._stopped:
+                print(f"[Risk] STOP-LOSS TRIGGERED: PnL={pnl_pct*100:.1f}% ≤ {self._stop_loss_pct*100:.0f}%")
+                self._stopped = True
+            return False
+
+        # Reset stop-loss if PnL recovers above threshold
+        if self._stopped and pnl_pct > self._stop_loss_pct + 0.05:
+            print(f"[Risk] Stop-loss cleared (PnL recovered to {pnl_pct*100:.1f}%)")
+            self._stopped = False
+
+        if self._stopped:
+            return False
+
+        # Daily drawdown: -15% from day's start value
+        now = datetime.now(timezone.utc)
+        if self._daily_stop_until and now < self._daily_stop_until:
+            remaining = (self._daily_stop_until - now).total_seconds()
+            print(f"[Risk] Daily drawdown halt: {remaining/3600:.1f}h remaining")
+            return False
+        if self._daily_stop_until and now >= self._daily_stop_until:
+            self._daily_stop_until = None
+            print("[Risk] Daily drawdown halt expired, resuming")
+
+        # Track day-start value
+        today = now.date()
+        if self._day_start_value is None:
+            self._day_start_value = self.portfolio.total_value
+        # Reset at day boundary
+        day_start_ts = getattr(self, '_day_start_date', None)
+        if day_start_ts != today:
+            self._day_start_value = self.portfolio.total_value
+            self._day_start_date = today
+
+        daily_change = (self.portfolio.total_value - self._day_start_value) / self._day_start_value if self._day_start_value > 0 else 0
+        if daily_change <= self._daily_drawdown_pct:
+            halt_hours = 24
+            self._daily_stop_until = now + timedelta(hours=halt_hours)
+            print(f"[Risk] Daily drawdown {daily_change*100:.1f}% ≤ {self._daily_drawdown_pct*100:.0f}% → halting {halt_hours}h")
+            return False
+
+        return True
+
+    def _count_whale_positions(self, whale_addr: str) -> int:
+        """Count how many open positions are from a specific whale address."""
+        if not whale_addr:
+            return 0
+        return sum(1 for p in self.portfolio.positions.values()
+                   if p.get("whale_address", "") == whale_addr)
 
     # ── Uptime ──────────────────────────────────────────────────────────────
 

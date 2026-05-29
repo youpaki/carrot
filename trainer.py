@@ -7,6 +7,7 @@ import asyncio
 import itertools
 import json
 import random
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ class TrainingManager:
         self.running = False
         self.jobs_active = 0
         self.total_completed = 0
+        self.started_at = None
         self._executor = None
 
     async def fetch_data(self) -> tuple:
