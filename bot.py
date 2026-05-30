@@ -363,6 +363,7 @@ class CarrotBot:
                         {"key": "WHALE_FILTER", "label": "Whale Filter", "type": "text", "default": config.WHALE_FILTER},
                         {"key": "INITIAL_BUDGET", "label": "Budget $", "type": "number", "default": str(config.INITIAL_BUDGET)},
                         {"key": "RETRAIN_MIN_NEW", "label": "Retrain threshold", "type": "number", "default": str(config.RETRAIN_MIN_NEW), "step": 1000},
+                        {"key": "MAX_PRICE", "label": "Max Price", "type": "number", "default": str(config.MAX_PRICE), "min": 0.5, "max": 0.98, "step": 0.01},
                     ]
                 },
                 {
@@ -432,6 +433,9 @@ class CarrotBot:
             return
 
         if price <= 0 or price > 1:
+            return
+        # Skip trades where price is too high (tiny profit margin relative to risk)
+        if price >= config.MAX_PRICE:
             return
         outcome = trade.get("outcome", "YES")
 
@@ -951,6 +955,7 @@ class CarrotBot:
                 "AUTO_TRAIN": config.AUTO_TRAIN,
                 "AUTO_RETRAIN": config.AUTO_RETRAIN,
                 "RETRAIN_MIN_NEW": config.RETRAIN_MIN_NEW,
+                "MAX_PRICE": config.MAX_PRICE,
             },
             "wallet": {
                 "wallet_id": config.WALLET_ID,
@@ -1099,6 +1104,7 @@ class CarrotBot:
                 "AUTO_TRAIN": config.AUTO_TRAIN,
                 "AUTO_RETRAIN": config.AUTO_RETRAIN,
                 "RETRAIN_MIN_NEW": config.RETRAIN_MIN_NEW,
+                "MAX_PRICE": config.MAX_PRICE,
             },
             "status": {
                 "uptime": self._uptime_str(),
