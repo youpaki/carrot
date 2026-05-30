@@ -43,11 +43,11 @@ class TrainingManager:
     async def fetch_data(self) -> tuple:
         """Fetch ML training dataset from PolyCore. Returns (X_train, y_train, X_test, y_test)."""
         url = f"{config.POLYCORE_URL}/tracker/export/ml/lite"
-        params = {"only_resolved": True, "min_size_usdc": 1}
+        params = {"only_resolved": True, "min_size_usdc": 1, "max_rows": 500000}
         if config.WHALE_FILTER:
             params["whale_address"] = config.WHALE_FILTER
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             r = await client.get(url, params=params,
                                  headers={"X-API-Key": config.API_KEY})
             r.raise_for_status()
@@ -115,10 +115,10 @@ class TrainingManager:
 
         try:
             X_train, y_train, X_test, y_test = await asyncio.wait_for(
-                self.fetch_data(), timeout=120
+                self.fetch_data(), timeout=360
             )
         except (asyncio.TimeoutError, httpx.TimeoutException) as e:
-            print(f"[Trainer] Data fetch timed out. Will retry later.")
+            print(f"[Trainer] Data fetch timed out (360s). Will retry later.")
             self.running = False
             return
         except Exception as e:
@@ -148,7 +148,7 @@ class TrainingManager:
         next_idx = config.MAX_TRAIN_JOBS
         completed = 0
 
-        max_duration = 600  # 10 min total training timeout
+        max_duration = 3600  # 1 hour total training timeout (500K rows)
         started = time.time()
         while futures and self.running:
             if time.time() - started > max_duration:

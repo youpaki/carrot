@@ -201,7 +201,7 @@ class CarrotBot:
         h = {"X-API-Key": config.API_KEY, "Content-Type": "application/json"}
         try:
             if self.httpx_client is None:
-                self.httpx_client = httpx.AsyncClient(timeout=15, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+                self.httpx_client = httpx.AsyncClient(timeout=60, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
             r = await self.httpx_client.request(method, url, json=body, params=params, headers=h, timeout=timeout)
             if r.status_code >= 400:
                 detail = r.text[:500]
