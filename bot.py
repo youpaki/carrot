@@ -174,6 +174,7 @@ class CarrotBot:
         self._tasks = []
         self._live_positions = []
         self._live_trades = []
+        self._wallet_address = "0xD1002995F2D536C6977364347E111472e5E65D09"
 
         # ── Risk management ──────────────────────────────────────────────────
         self._stopped = False               # stop-loss tripped
@@ -788,6 +789,9 @@ class CarrotBot:
             if isinstance(balance_raw, dict):
                 balance_raw = balance_raw.get("balance", 0)
             self.portfolio.cash = round(int(balance_raw) / 1_000_000, 4)
+            # Capture wallet address for data-api queries
+            if data.get("wallet"):
+                self._wallet_address = data["wallet"]
         except Exception as e:
             print(f"[Sync] Balance parse error: {e}")
 
@@ -841,7 +845,7 @@ class CarrotBot:
             async with httpx.AsyncClient(timeout=60) as client:
                 r = await client.get(
                     "https://data-api.polymarket.com/positions",
-                    params={"user": "0xD1002995F2D536C6977364347E111472e5E65D09", "sizeThreshold": 0, "limit": 200},
+                    params={"user": self._wallet_address, "sizeThreshold": 0, "limit": 200},
                 )
                 positions = r.json()
                 real_value = sum(p.get("currentValue", 0) for p in positions)
@@ -866,7 +870,6 @@ class CarrotBot:
                     } for p in active[:15]],
                 }
         except Exception as e:
-            print(f"[Sync] Real portfolio: {len(active)} positions, value=${real_value:.2f}, pnl=${real_pnl:.2f}")
             print(f"[Sync] Real portfolio fetch failed: {type(e).__name__}: {e}")
 
     # ── State file dump (for dashboard) ──────────────────────────────────────
