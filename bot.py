@@ -878,40 +878,33 @@ class CarrotBot:
         pf = self.portfolio
         m = self.get_model()
 
-        # In live mode, fetch real portfolio from Polymarket data-api
+        # In live mode: use synced positions (CLOB) as primary, data-api for PnL only
         if not config.DRY_RUN:
-            # Fetch real portfolio value directly (no dependency on _sync_live_wallet timing)
+            positions = {}
+            for pid, p in pf.positions.items():
+                if not isinstance(p, dict):
+                    continue
+                sz = float(p.get("shares", p.get("size", 0)))
+                avg = float(p.get("price", p.get("avg_price", 0)))
+                cst = float(p.get("cost", 0))
+                if sz <= 0 or cst <= 0:
+                    continue
+                positions[pid] = {
+                    "market_id": p.get("market_id", p.get("market", "")),
+                    "outcome": p.get("outcome", ""),
+                    "shares": sz,
+                    "price": avg,
+                    "cost": round(cst, 4),
+                    "market_title": p.get("market_title", p.get("question", "")),
+                }
+            cash = round(pf.cash, 4)
+            total_invested = round(sum(p.get("cost", 0) for p in positions.values()), 4)
             rp = getattr(self, '_real_portfolio', None)
             if rp:
-                cash = round(pf.cash, 4)
-                total_invested = rp["value"]  # current market value of positions
                 total_pnl = round((pf.cash + rp["value"]) - pf.initial_cash, 2)
-                total_trades = len(self._live_trades) if self._live_trades else 0
-                positions = {f"rp_{i}": p for i, p in enumerate(rp.get("positions", []))}
-                trade_history = []
             else:
-                # Fallback: use portfolio positions
-                positions = {}
-                for pid, p in pf.positions.items():
-                    if not isinstance(p, dict):
-                        continue
-                    sz = float(p.get("shares", p.get("size", 0)))
-                    avg = float(p.get("price", p.get("avg_price", 0)))
-                    cst = float(p.get("cost", 0))
-                    if sz <= 0 or cst <= 0:
-                        continue
-                    positions[pid] = {
-                        "market_id": p.get("market_id", p.get("market", "")),
-                        "outcome": p.get("outcome", ""),
-                        "shares": sz,
-                        "price": avg,
-                        "cost": round(cst, 4),
-                        "market_title": p.get("market_title", p.get("question", "")),
-                    }
-                cash = round(pf.cash, 4)
-                total_invested = round(sum(p.get("cost", 0) for p in positions.values()), 4)
-                total_pnl = 0
-                total_trades = len(self._live_trades) if self._live_trades else 0
+                total_pnl = round((pf.cash + total_invested) - pf.initial_cash, 2)
+            total_trades = len(self._live_trades) if self._live_trades else 0
             trade_history = []
         else:
             positions = {pid: {k: (str(v) if isinstance(v, datetime) else round(v, 6) if isinstance(v, float) else v) for k, v in p.items()} for pid, p in pf.positions.items()}
