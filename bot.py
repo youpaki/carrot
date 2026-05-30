@@ -50,9 +50,8 @@ class Portfolio:
             self.cash = data["cash"]
         # initial_cash always from .env config, not DB
         self.total_trades = data["total_trades"]
-        # In live mode, don't load old paper positions — PolyCore is source of truth
+        # In live mode, load positions from DB as fallback (CLOB sync overwrites later)
         if not config.DRY_RUN:
-            self.positions = {}
             self.trade_history = []
         else:
             self.positions = data["positions"]
