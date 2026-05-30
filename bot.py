@@ -783,10 +783,13 @@ class CarrotBot:
         try:
             r = await client.get(f"{base}/clob/balance/{config.BOT_ID}", headers=h)
             r.raise_for_status()
-            balance_raw = int(r.json().get("balance", {}).get("balance", 0))
-            self.portfolio.cash = round(balance_raw / 1_000_000, 4)
-        except Exception:
-            pass
+            data = r.json()
+            balance_raw = data.get("balance", 0)
+            if isinstance(balance_raw, dict):
+                balance_raw = balance_raw.get("balance", 0)
+            self.portfolio.cash = round(int(balance_raw) / 1_000_000, 4)
+        except Exception as e:
+            print(f"[Sync] Balance parse error: {e}")
 
         # Positions
         try:
@@ -878,7 +881,7 @@ class CarrotBot:
             rp = getattr(self, '_real_portfolio', None)
             if rp:
                 cash = round(pf.cash, 4)
-                total_invested = rp["value"]
+                total_invested = rp["cost"]  # cost basis, not current value
                 total_pnl = round((pf.cash + rp["value"]) - pf.initial_cash, 2)
                 total_trades = len(self._live_trades) if self._live_trades else 0
                 positions = {f"rp_{i}": p for i, p in enumerate(rp.get("positions", []))}
