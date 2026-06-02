@@ -421,10 +421,8 @@ class CarrotBot:
             whale_data = t.get("whale_data", {})
             if whale_addr and whale_data:
                 self.whale_cache[whale_addr] = whale_data
-        if self._events_received == 0 and whale_addr and t:
-            has_market = "market_end_date" in t
-            has_wi = "price_impact" in t
-            print(f"[WS_DEBUG] wd={type(t.get('whale_data')).__name__} keys={len(t)} market_end={has_market} price_impact={has_wi}")
+        if self._events_received % 2000 == 1 and whale_addr and t:
+            pass  # quiet
 
         features = encode_event(data, self.whale_cache)
         X = features_array(features)
