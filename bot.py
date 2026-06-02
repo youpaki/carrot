@@ -416,16 +416,15 @@ class CarrotBot:
         # Populate whale_cache from enriched WS event data
         d = data.get("data", data) if isinstance(data, dict) else {}
         whale_addr = d.get("whale_address", "")
-        whale_data = d.get("whale_data", {})
-        if whale_addr and whale_data:
-            self.whale_cache[whale_addr] = whale_data
-        if self._events_received == 0 and whale_addr:
-            print(f"[WS_DEBUG] event keys: {list(d.keys())}")
-            t = d.get("trade", {})
-            print(f"[WS_DEBUG] trade keys: {list(t.keys())[:20]}")
-            print(f"[WS_DEBUG] whale_addr={whale_addr}, has_whale_data={'whale_data' in d}, has_market_end_date={'market_end_date' in t}")
-            if 'whale_data' in d:
-                print(f"[WS_DEBUG] whale_data: {d['whale_data']}")
+        t = d.get("trade", {})
+        if isinstance(t, dict):
+            whale_data = t.get("whale_data", {})
+            if whale_addr and whale_data:
+                self.whale_cache[whale_addr] = whale_data
+        if self._events_received == 0 and whale_addr and t:
+            has_market = "market_end_date" in t
+            has_wi = "price_impact" in t
+            print(f"[WS_DEBUG] wd={type(t.get('whale_data')).__name__} keys={len(t)} market_end={has_market} price_impact={has_wi}")
 
         features = encode_event(data, self.whale_cache)
         X = features_array(features)
