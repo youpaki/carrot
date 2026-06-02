@@ -53,7 +53,9 @@ def encode_event(evt: dict, whale_cache: dict = None) -> dict:
         ts = datetime.now(timezone.utc)
 
     outcome = (trade.get("outcome", "") or "").lower()
-    outcome_index = 0 if outcome in ("yes", "up") else 1
+    outcome_index = trade.get("outcome_index")
+    if outcome_index is None:
+        outcome_index = 0 if outcome in ("yes", "up") else 1
 
     whale_addr = d.get("whale_address", "")
     wc = (whale_cache or {}).get(whale_addr, {})
@@ -63,6 +65,29 @@ def encode_event(evt: dict, whale_cache: dict = None) -> dict:
 
     slug = trade.get("market_slug", "")
     market_category_id = _category_id(slug)
+
+    # Compute days_to_resolution and market_close_soon from market_end_date
+    market_end_date_str = trade.get("market_end_date")
+    days_to_resolution = 30.0
+    market_close_soon = 0
+    if market_end_date_str:
+        try:
+            end_date = datetime.fromisoformat(market_end_date_str.replace("Z", "+00:00"))
+            diff_days = (end_date - ts).total_seconds() / 86400
+            days_to_resolution = max(0.0, round(diff_days, 1))
+            market_close_soon = 1 if diff_days <= 7 else 0
+        except Exception:
+            pass
+
+    # Compute whale_age_months from whale_cache
+    whale_age_months = 6.0
+    added_at_str = wc.get("added_at")
+    if added_at_str:
+        try:
+            added = datetime.fromisoformat(added_at_str.replace("Z", "+00:00"))
+            whale_age_months = max(0.0, round((ts - added).total_seconds() / (86400 * 30), 1))
+        except Exception:
+            pass
 
     return {
         "whale_trust_score": whale_trust,
@@ -88,9 +113,9 @@ def encode_event(evt: dict, whale_cache: dict = None) -> dict:
         "market_liquidity": float(trade.get("market_liquidity", 0) or 0),
         "price_before": float(trade.get("price_before", 0) or 0),
         "price_impact": float(trade.get("price_impact", 0) or 0),
-        "days_to_resolution": 30,  # default estimate
-        "market_close_soon": 0,
-        "whale_age_months": 6,     # default estimate
+        "days_to_resolution": days_to_resolution,
+        "market_close_soon": market_close_soon,
+        "whale_age_months": whale_age_months,
         "market_category_id": market_category_id,
     }
 

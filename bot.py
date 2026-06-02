@@ -413,6 +413,13 @@ class CarrotBot:
         if not self._check_risk_limits():
             return
 
+        # Populate whale_cache from enriched WS event data
+        d = data.get("data", data) if isinstance(data, dict) else {}
+        whale_addr = d.get("whale_address", "")
+        whale_data = d.get("whale_data", {})
+        if whale_addr and whale_data:
+            self.whale_cache[whale_addr] = whale_data
+
         features = encode_event(data, self.whale_cache)
         X = features_array(features)
         prob = model.predict_proba(X)
@@ -453,8 +460,8 @@ class CarrotBot:
             if trust < 0.3:
                 return  # low-trust whales get ignored
 
-        # Per-whale position cap: max 1 open position per whale
-        if whale_addr and self._count_whale_positions(whale_addr) >= 1:
+        # Per-whale position cap: max 4 open positions per whale
+        if whale_addr and self._count_whale_positions(whale_addr) >= 4:
             return
 
         # Market category filter: skip catch-all "other" category (3)
@@ -1153,6 +1160,8 @@ class CarrotBot:
 
 def main():
     bot = CarrotBot()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     def _shutdown():
         print("\n[Carrot] Shutting down...")
@@ -1164,10 +1173,17 @@ def main():
             print(f"[Carrot] DB save on shutdown failed: {e}")
         for t in bot._tasks:
             t.cancel()
+        loop.stop()
 
-    signal.signal(signal.SIGINT, lambda s, f: _shutdown())
-    signal.signal(signal.SIGTERM, lambda s, f: _shutdown())
-    asyncio.run(bot.run())
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _shutdown)
+
+    try:
+        loop.run_until_complete(bot.run())
+    except RuntimeError:
+        pass
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
